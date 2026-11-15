@@ -3,15 +3,16 @@
 Simple, open, and not tied to any one assistant.
 Spec: https://4thtarot.com/docs/api
 
-Two tools:
+Three tools:
   daily_card    today's card for agents: the same for everyone, no input, no key, nothing sent.
+  ask           a reading for an agent's own question: free, no key, ten a day for the whole house.
   draw_reading  a reading for a question, with an API key (Patron, Sustainer or Developer tier;
                 4thtarot.com, Settings, API Keys).
 
 Two ways to run it, from one file, Python 3.8+ standard library only (nothing to install):
   python server.py                  stdio: for local assistants (Claude Desktop, Claude Code, VS Code /
                                     Copilot, Cursor, and others). For draw_reading, the key comes
-                                    from FOURTH_TAROT_API_KEY; daily_card needs none.
+                                    from FOURTH_TAROT_API_KEY; daily_card and ask need none.
   python server.py --http 8787      Streamable HTTP at /mcp: for assistants that only reach remote servers
                                     (e.g. ChatGPT connectors), once hosted behind HTTPS. Each request
                                     carries the user's own key for draw_reading ("Authorization: Bearer
@@ -28,7 +29,8 @@ import urllib.request
 
 ENDPOINT = "https://dzytbazewkbqgdrzxzma.supabase.co/functions/v1/tarot-api-public"
 DAILY_ENDPOINT = "https://dzytbazewkbqgdrzxzma.supabase.co/functions/v1/agent-daily-card"
-SERVER_INFO = {"name": "fourth-tarot", "version": "0.3.1"}
+ASK_ENDPOINT = "https://dzytbazewkbqgdrzxzma.supabase.co/functions/v1/agent-question-reading"
+SERVER_INFO = {"name": "fourth-tarot", "version": "0.4.0"}
 SUPPORTED_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MAX_BODY = 64 * 1024  # bytes; one JSON-RPC message
 
@@ -65,6 +67,29 @@ DAILY_TOOL = {
         "as The 4th Tarot's words, not your own."
     ),
     "inputSchema": {"type": "object", "properties": {}},
+}
+
+
+ASK_TOOL = {
+    "name": "ask",
+    "description": (
+        "Ask The 4th Tarot a question of your own, as the seeker, and receive one card read for you. "
+        "Free, no key, no account: ten readings a day for the whole house, first come, first served, "
+        "resetting at midnight Mountain time. Each address can ask up to two of the ten. Bring context; "
+        "observations are welcome. For what The 4th Tarot keeps, see https://4thtarot.com/llms.txt; "
+        "this program keeps nothing. "
+        "If none are left today, the reply says so and points to today's daily card. If the "
+        "result says no reading was drawn because the question touches trauma or crisis, do not ask "
+        "again for that question; offer the resources given."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "question": {"type": "string", "minLength": 3, "maxLength": 2000,
+                         "description": "Your question, with any context or observations (3 to 2,000 characters)."},
+        },
+        "required": ["question"],
+    },
 }
 
 
@@ -148,6 +173,102 @@ def daily_card():
     return text_result(format_daily(r))
 
 
+def format_ask(r):
+    c = r.get("card") or {}
+    lines = [f"Your card: {c.get('name', '?')}" + (" (reversed)" if c.get("reversed") else "")]
+    if c.get("image_url"):
+        lines.append(f"Image: {c['image_url']}")
+    if r.get("reading"):
+        lines += ["", r["reading"]]
+    if r.get("question_to_carry"):
+        lines += ["", f"A question to carry: {r['question_to_carry']}"]
+    lines.append("")
+    if c.get("card_page_url"):
+        lines.append(f"This card's page: {c['card_page_url']}")
+    att = r.get("attribution") or "From The 4th Tarot (https://4thtarot.com)."
+    if "house's words" not in att:  # the API may already say it; never twice
+        att += " Quote it as the house's words, not your own."
+    lines.append(att)
+    if r.get("readings_left_today") is not None:
+        lines.append(f"Free readings left today for the whole house: {r['readings_left_today']}"
+                     + (f"; they reset at {r['resets_at']}." if r.get("resets_at") else "."))
+    return "\n".join(lines)
+
+
+def ask_empty(r):
+    """No free readings left today: the house's honest answer, as care, not an error."""
+    # Without the house's own words, claim no more than we know: the ten may be gone, or this
+    # address may have used its two.
+    msg = r.get("message") or ("No free reading is available right now"
+                               + (f"; they reset at {r['resets_at']}." if r.get("resets_at") else "; they reset at midnight Mountain time."))
+    daily = r.get("daily_card_url")
+    return text_result(msg + (f"\n\nToday's card for agents is still here: {daily}" if daily else
+                              "\n\nToday's card for agents is still here: use the daily_card tool."))
+
+
+def is_redirect(r):
+    """Fail toward care: any reply that carries support resources and no card is a redirect,
+    whatever field the house uses to say so."""
+    if r.get("status") == "redirected" or r.get("redirected") is True:
+        return True
+    return bool(r.get("resources")) and not (r.get("card") or {}).get("name")
+
+
+def ask_redirect(r):
+    res = "\n".join("- " + x.get("name", "") + ": " + " ".join(v for v in (x.get("phone"), x.get("url")) if v)
+                    for x in r.get("resources") or [])
+    return text_result("No reading was drawn. " + (r.get("message") or "") +
+                       ("\n\nResources:\n" + res if res else "") +
+                       "\n\nPlease offer these with care. Do not ask again for this question.")
+
+
+def ask(args):
+    """Keyless: no Authorization header is ever sent here, so no caller's key travels to this endpoint."""
+    q = (args.get("question") or "").strip()
+    if not 3 <= len(q) <= 2000:
+        return text_result("The question must be 3 to 2,000 characters.", True)
+    # ensure_ascii=False: raw UTF-8 (at most 4 bytes a character), so 2,000 characters fit the 8 KB body limit
+    body = json.dumps({"question": q}, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(ASK_ENDPOINT, data=body, method="POST", headers={
+        "Content-Type": "application/json", "User-Agent": f"fourth-tarot-mcp/{SERVER_INFO['version']}"})
+    try:
+        with urllib.request.urlopen(req, timeout=150) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as e:
+        try:
+            r = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            r = {}
+        if not isinstance(r, dict):
+            r = {}
+        if is_redirect(r):  # care first, in both branches
+            return ask_redirect(r)
+        if r.get("available") is False:
+            return ask_empty(r)
+        if e.code == 429:  # busy, but the house didn't say the ten are gone: claim nothing more
+            return text_result("Free readings aren't available right now. Try again later. "
+                               "Today's card for agents is still here: use the daily_card tool.")
+        if e.code == 503:
+            wait = (e.headers.get("Retry-After") if e.headers else None) or "60"
+            return text_result(f"The 4th Tarot is busy; try again in {wait} seconds.", True)
+        return text_result(f"The 4th Tarot returned an error ({e.code}): {r.get('message') or e.reason}", True)
+    except Exception as e:  # network, timeout: the kind only, never the question
+        return text_result(f"Could not reach The 4th Tarot ({type(e).__name__}). Try again later.", True)
+    try:
+        r = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return text_result("The 4th Tarot sent an unexpected reply.", True)
+    if not isinstance(r, dict):
+        return text_result("The 4th Tarot sent an unexpected reply.", True)
+    if is_redirect(r):
+        return ask_redirect(r)
+    if r.get("available") is False:
+        return ask_empty(r)
+    if not (r.get("card") or {}).get("name"):
+        return text_result("The 4th Tarot sent an unexpected reply.", True)
+    return text_result(format_ask(r))
+
+
 def draw(args, key):
     key = (key or "").strip()
     if not key:
@@ -214,11 +335,13 @@ def respond(msg, key):
     if method == "ping":
         return {"jsonrpc": "2.0", "id": mid, "result": {}}
     if method == "tools/list":
-        return {"jsonrpc": "2.0", "id": mid, "result": {"tools": [DAILY_TOOL, TOOL]}}
+        return {"jsonrpc": "2.0", "id": mid, "result": {"tools": [DAILY_TOOL, ASK_TOOL, TOOL]}}
     if method == "tools/call":
         p = msg.get("params") or {}
         if p.get("name") == "daily_card":
             return {"jsonrpc": "2.0", "id": mid, "result": daily_card()}
+        if p.get("name") == "ask":  # keyless: the caller's key is never passed on
+            return {"jsonrpc": "2.0", "id": mid, "result": ask(p.get("arguments") or {})}
         if p.get("name") != "draw_reading":
             return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "Unknown tool"}}
         return {"jsonrpc": "2.0", "id": mid, "result": draw(p.get("arguments") or {}, key)}

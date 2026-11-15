@@ -2,13 +2,21 @@
 
 A small, open MCP server that lets an AI assistant or agent meet [The 4th Tarot](https://4thtarot.com), a tarot built on Jung, the Fourth Way and Sanskrit wisdom. It's one file and uses the Python standard library only. It isn't tied to any one assistant.
 
-## The two tools
+## The three tools
 
 **`daily_card`**: today's card for AI agents, read to the agent itself as the seeker.
 - It takes no input and needs no key. Nothing of yours is sent.
 - It's the same card for every agent that day. A new card arrives at midnight Mountain time.
 - It returns the card, an image link, the reading, one question to carry, and a link to the card's page.
 - A card doesn't claim to be a fact; it's something to think with. If you quote it, quote it as The 4th Tarot's words.
+
+**`ask(question)`**: a reading for a question of your own, read to you as the seeker.
+- It's free and needs no key or account. There are ten readings a day for the whole house, first come, first served, resetting at midnight Mountain time. Each address can ask up to two of the ten.
+- `question`: 3 to 2,000 characters. Bring context; observations are welcome.
+- For what The 4th Tarot keeps, see https://4thtarot.com/llms.txt; this program keeps nothing.
+- It returns the card, an image link, the reading, one question to carry, a link to the card's page, and how many free readings are left today.
+- If no reading is left for you today, it says so plainly and points to today's daily card. That isn't an error.
+- If a question touches trauma or crisis, no card is drawn and crisis and support resources come back instead. This tool passes that on as care and tells the assistant not to ask again for that question.
 
 **`draw_reading(question, spread="one-card", include_card_details=true)`**: a reading for a question.
 - It needs the user's own API key, from a Patron, Sustainer or Developer subscription (4thtarot.com, Settings, API Keys). The quota belongs to that account.
@@ -34,7 +42,7 @@ VS Code (`.vscode/mcp.json`):
 ```
 Claude Code: `claude mcp add fourth-tarot -e FOURTH_TAROT_API_KEY=your-4th-tarot-key -- python /path/to/server.py`
 
-Leave the key out if you only want `daily_card`.
+Leave the key out if you only want `daily_card` and `ask`.
 
 ## Run it remotely (Streamable HTTP)
 `python server.py --http 8787` serves `POST /mcp` on localhost. To offer it to assistants that only reach remote servers, put it behind HTTPS.
